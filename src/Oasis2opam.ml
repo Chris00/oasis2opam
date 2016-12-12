@@ -285,75 +285,95 @@ let opam_findlib t flags =
     close_out fh
   )
 
-let () =
-  OASISBuiltinPlugins.init ();
+type spec_state = {
+    url : string;
+    local : bool;
+    install : bool;
+    always_yes : bool;
+    version : bool;
+    duplicates : bool;
+    query_findlib : string
+  }
+
+let fspecs usage_msg =
   let local = ref false in
   let install = ref false in
   let always_yes = ref false in
   let version = ref false in
   let duplicates = ref false in
   let query_findlib = ref "" in
-  let specs = [
-    "--local", Arg.Set local,
-    " create an opam dir for the _oasis in the current dir";
-    "--install", Arg.Set install,
-    " use an <pkg>.install file to remove executables,... instead of oasis (not recommended)";
-    "-y", Arg.Set always_yes,
-    " answer \"y\" to all questions";
-    "--duplicates", Arg.Set duplicates,
-    " output a list of packages providing the same ocamlfind library";
-    "--query", Arg.Set_string query_findlib,
-    "LIB return the list of OPAM packages providing LIB";
-    "--version", Arg.Set version,
-    " print the oasis2opam version";
-    ] in
   let url = ref "" in
-  let specs = Arg.align(specs @ fst (OASISContext.fspecs ())) in
-  let usage_msg = "oasis2opam <url or tarball>" in
-  Arg.parse specs (fun u -> url := u) usage_msg;
-  if !version then (
+  let specs = [
+      ("--local", Arg.Set local,
+       " create an opam dir for the _oasis in the current dir");
+      ("--install", Arg.Set install,
+       " use an <pkg>.install file to remove executables,... instead \
+        of oasis (not recommended)");
+      ("-y", Arg.Set always_yes,
+       " answer \"y\" to all questions");
+      ("--duplicates", Arg.Set duplicates,
+       " output a list of packages providing the same ocamlfind library");
+      ("--query", Arg.Set_string query_findlib,
+       "LIB return the list of OPAM packages providing LIB");
+      ("--version", Arg.Set version,
+       " print the oasis2opam version");
+    ] in
+  let anon_fn u = url := u in
+  let cli_parsing = (specs, anon_fn) in
+  let post () =
+    if not !version && not !duplicates && !query_findlib = ""
+       && !url = "" && not !local then (
+      Arg.usage specs usage_msg;
+      exit 1
+    );
+    (* Thus [!url = ""] iff !local, from now on. *)
+    { local = !local;  install = !install;  always_yes = !always_yes;
+      version = !version;  duplicates = !duplicates;
+      query_findlib = !query_findlib;  url = !url } in
+  (cli_parsing, post)
+
+
+let run s =
+  if s.version then (
     printf "Version: %s\n" Conf.version;
     if Conf.git_hash <> "" then printf "Git hash: %s\n" Conf.git_hash;
     exit 0
   );
-  if !duplicates then (
+  if s.duplicates then (
     BuildDepends.output_duplicates stdout;
     exit 0;
   );
-  if !query_findlib <> "" then (
-    (match Opam.of_findlib !query_findlib with
-     | [] -> printf "%S is NOT provided by an OPAM package.\n" !query_findlib
+  if s.query_findlib <> "" then (
+    (match Opam.of_findlib s.query_findlib with
+     | [] -> printf "%S is NOT provided by an OPAM package.\n" s.query_findlib
      | pkgs -> let pkgs = BuildDepends.constrain_opam_package
                             (pkgs, Version.no_constraint) in
-               printf "%S is provided by: %s\n" !query_findlib
+               printf "%S is provided by: %s\n" s.query_findlib
                       (BuildDepends.string_of_packages pkgs));
     exit 0;
   );
-  if !url = "" && not !local then (Arg.usage specs usage_msg; exit 1);
-  (* Thus [!url = ""] iff !local, from now on. *)
-
   let opam_file_version = OASISVersion.version_of_string "1.2" in
-  let t = Tarball.get !url in
+  let t = Tarball.get s.url in
   let pkg = Tarball.oasis t in
   let flags = get_flags pkg.sections in
   let dir = Tarball.pkg_opam_dir t in
   (try Unix.mkdir dir 0o777
    with Unix.Unix_error (Unix.EEXIST, _, _) ->
-        if !local && not !always_yes
+        if s.local && not s.always_yes
            && not(y_or_n "The existing opam dir is going to be \
                          overwritten. Continue?" ~default:true) then
           exit 0);
   (* If there are only ocamlfind packages to remove, there is no need to
      use oasis to perform the removal. *)
   let remove_with_oasis =
-    not !install && (Install.binaries t ~flags <> []
+    not s.install && (Install.binaries t ~flags <> []
                     || Install.datafiles t ~flags <> []) in
   opam_descr t;
   opam_url t;
-  opam_opam t flags opam_file_version ~local:!local ~remove_with_oasis;
+  opam_opam t flags opam_file_version ~local:s.local ~remove_with_oasis;
   opam_findlib t flags;
   if remove_with_oasis then
-    Install.oasis t ~local:!local
+    Install.oasis t ~local:s.local
   else
-    Install.opam t flags ~local:!local;
+    Install.opam t flags ~local:s.local;
   info (sprintf "OPAM directory %S created." dir)
